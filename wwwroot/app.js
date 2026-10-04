@@ -516,7 +516,7 @@ async function words(live) {
 }
 
 // ---------- long reading ----------
-const LONG_LEVELS = { el: ['B1'], en: ['B1', 'B2'] };
+const LONG_LEVELS = { el: ['B1', 'B2'], en: ['B1', 'B2'] };  // Greek B2 is optional stretch reading (adaptive scale stops at B1)
 async function readLong(lang, level, live) {
   const story = Offline.story({ lang, level, seen: S.seenLong[lang], long: true });
   S.seenLong[lang] = [...S.seenLong[lang].filter(id => id !== story.id), story.id].slice(-40);
