@@ -68,16 +68,19 @@ function view(html, handlers = {}) {
 // Run a render function that resolves a promise when the user moves on.
 const step = render => new Promise(resolve => render(resolve));
 
-function speak(text, lang) {
+function speakLines(texts, lang) {
   if (!('speechSynthesis' in window)) return toast('المتصفح لا يدعم النطق');
   const voices = speechSynthesis.getVoices();
   const code = LANGS[lang].tts.slice(0, 2);
   if (voices.length && !voices.some(v => v.lang.toLowerCase().startsWith(code))) toast(`ما في صوت للغة ${LANGS[lang].name} على جهازك`);
   speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = LANGS[lang].tts; u.rate = 0.85;
-  speechSynthesis.speak(u);
+  for (const t of texts) {
+    const u = new SpeechSynthesisUtterance(t);
+    u.lang = LANGS[lang].tts; u.rate = 0.85;
+    speechSynthesis.speak(u);
+  }
 }
+const speak = (text, lang) => speakLines([text], lang);
 
 function touchStreak() {
   const t = today(), s = S.streak;
@@ -172,7 +175,7 @@ async function reviewCards(cards, title) {
         <div class="progress"><i style="width:${(i / cards.length) * 100}%"></i></div>
         <div class="card">
           <div class="muted">${esc(title)} ${i + 1}/${cards.length} · ${LANGS[c.lang].flag}</div>
-          <div class="flash">${esc(c.word)}</div>
+          <div class="flash" style="font-size:${c.word.length > 28 ? 22 : 30}px">${esc(c.word)}</div>
           <div class="row" style="justify-content:center"><button data-act="say">🔊 انطق</button></div>
           <div id="ans" style="text-align:center;margin-top:16px"><button class="primary" data-act="show">اكشف المعنى</button></div>
         </div>`, {
@@ -216,6 +219,11 @@ function home() {
     </div>
     ${langCard('el')}
     ${langCard('en')}
+    <div class="card">
+      <h2>🎭 حوارات عملية</h2>
+      <p class="muted">مقابلة عمل، شقة، راتب، دكتور، دائرة حكومية، طوارئ. اقرأ، واستمع، ثم تدرّب على دورك.</p>
+      <a class="btn primary" href="#/dialogues">افتح</a>
+    </div>
     <div class="card">
       <h2>🆘 جمل البقاء باليونانية</h2>
       <p class="muted">العقد، الراتب، البيت، الدكتور، الدوائر، الطوارئ: الجمل اللي بتحتاجها فعلًا.</p>
@@ -489,6 +497,53 @@ async function words(live) {
   draw();
 }
 
+function dialogues(lang, id) {
+  const d = lang && (BANK.dialogues[lang] || []).find(x => x.id === id);
+  if (!d) {
+    return view(`
+      <h1>🎭 حوارات عملية</h1>
+      <p class="muted">اختر موقفًا. اقرأ الحوار واستمع له، ثم جرّب «وضع التدريب»: بتلعب دورك وتقول جملتك بصوت عالٍ قبل ما تشوفها.</p>
+      ${Object.keys(LANGS).map(l => `
+        <h2>${LANGS[l].flag} ${LANGS[l].name}</h2>
+        ${BANK.dialogues[l].map(x => `<a class="card" style="display:block;color:inherit" href="#/dialogues/${l}/${x.id}"><b>${esc(x.title)}</b> <span class="pill">${esc(x.level)}</span> <span class="muted">${x.lines.length} سطر</span></a>`).join('')}`).join('')}`);
+  }
+  let practice = false, showAr = true;
+  const revealed = new Set();
+  const draw = () => view(`
+    <p><a href="#/dialogues">← كل الحوارات</a></p>
+    <h1>${esc(d.title)}</h1>
+    ${d.note ? `<div class="warn">${esc(d.note)}</div><br>` : ''}
+    <div class="row" style="margin-bottom:12px">
+      <button data-act="mode" class="${practice ? 'primary' : ''}">${practice ? '📖 وضع القراءة' : '🎭 وضع التدريب'}</button>
+      <button data-act="ar">${showAr ? 'إخفاء الترجمة' : 'إظهار الترجمة'}</button>
+      <button data-act="all">🔊 استمع للحوار</button>
+      <button data-act="addall">＋ جملي للمراجعة</button>
+    </div>
+    ${practice ? '<p class="muted">اقرأ سطر الطرف الثاني، ثم قل جملتك بصوت عالٍ قبل ما تكشفها.</p>' : ''}
+    ${d.lines.map((l, i) => {
+      const mine = l.w === 'm', hidden = practice && mine && !revealed.has(i);
+      return `<div class="card line ${mine ? 'me' : ''}">
+        <div class="muted">${mine ? '🙋 أنت' : '👤 الطرف الثاني'}</div>
+        ${hidden
+          ? `<div style="font-size:19px">🎯 ${esc(l.a)}</div><button data-act="reveal" data-i="${i}">اكشف الجملة</button>`
+          : `<div class="ltr" style="font-size:19px;line-height:1.6"><b>${esc(l.t)}</b></div>
+             ${showAr ? `<div>${esc(l.a)}</div>` : ''}
+             <div class="row" style="margin-top:6px"><button data-act="say" data-i="${i}" aria-label="استمع">🔊</button></div>`}
+      </div>`;
+    }).join('')}`, {
+    mode() { practice = !practice; revealed.clear(); draw(); },
+    ar() { showAr = !showAr; draw(); },
+    reveal(b) { revealed.add(+b.dataset.i); draw(); speak(d.lines[+b.dataset.i].t, lang); },
+    say: b => speak(d.lines[+b.dataset.i].t, lang),
+    all: () => speakLines(d.lines.map(l => l.t), lang),
+    addall() {
+      const n = d.lines.filter(l => l.w === 'm' && addCard(lang, l.t, l.a)).length;
+      toast(n ? `أضفت ${n} جمل للمراجعة` : 'كلها موجودة من قبل');
+    },
+  });
+  draw();
+}
+
 function survive(id) {
   const g = BANK.survive.find(x => x.id === id);
   if (!g) {
@@ -565,7 +620,7 @@ function settings() {
 let viewId = 0;
 function route() {
   const id = ++viewId, live = () => id === viewId;
-  const [, name = '', arg = ''] = (location.hash || '#/').slice(1).split('/');
+  const [, name = '', arg = '', arg2 = ''] = (location.hash || '#/').slice(1).split('/');
   const lang = LANGS[arg] ? arg : 'el';
   const run = p => p.catch(e => { if (live()) failScreen(e, route); });
   switch (name) {
@@ -573,6 +628,7 @@ function route() {
     case 'session': return run(session(lang, live));
     case 'civics': return run(civics(live));
     case 'words': return run(words(live));
+    case 'dialogues': return dialogues(LANGS[arg] ? arg : '', arg2);
     case 'survive': return survive(arg);
     case 'settings': return settings();
     default: return home();
