@@ -32,11 +32,13 @@ const Offline = (() => {
     return mc(pickOne(bank[order[0]]));
   }
 
-  function story({ lang, level, seen = [] }) {
+  // long: only the long reading texts (B1); otherwise every story of the level.
+  function story({ lang, level, seen = [], long = false }) {
     const bank = BANK[lang].stories;
-    const l = byDistance(base(level)).find(x => bank[x]);
-    const unseen = bank[l].filter(s => !seen.includes(s.id));
-    const s = pickOne(unseen.length ? unseen : bank[l]);
+    const l = long ? 'B1' : byDistance(base(level)).find(x => bank[x]);
+    const all = long ? bank[l].filter(s => s.long) : bank[l];
+    const unseen = all.filter(s => !seen.includes(s.id));
+    const s = pickOne(unseen.length ? unseen : all);
     return {
       id: s.id, title: s.t, text: s.x, translation_ar: s.ar,
       vocab: s.v.map(([word, meaning_ar]) => ({ word, meaning_ar })),

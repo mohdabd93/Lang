@@ -24,6 +24,7 @@ const defaults = () => ({
   seen: { el: [], en: [] },
   seenListen: { el: [], en: [] }, listen: { el: [], en: [] },
   exams: { el: [], en: [] },
+  seenLong: { el: [], en: [] }, reads: { el: [], en: [] },
 });
 function load() {
   try {
@@ -214,6 +215,7 @@ function home() {
       <div class="row">
         <a class="btn ${S.placed[lang] ? 'primary' : ''}" href="#/session/${lang}">▶ جلسة اليوم</a>
         <a class="btn ${S.placed[lang] ? '' : 'primary'}" href="#/placement/${lang}">${S.placed[lang] ? 'أعد تحديد المستوى' : 'حدّد مستواي'}</a>
+        <a class="btn" href="#/read/${lang}">📖 قراءة طويلة</a>
       </div>
     </div>`;
   view(`
@@ -511,6 +513,38 @@ async function words(live) {
     });
   };
   draw();
+}
+
+// ---------- long reading (B1) ----------
+async function readLong(lang, live) {
+  const story = Offline.story({ lang, level: 'B1', seen: S.seenLong[lang], long: true });
+  S.seenLong[lang] = [...S.seenLong[lang].filter(id => id !== story.id), story.id].slice(-40);
+  save();
+  const words = story.text.split(/\s+/).length;
+  await step(done => view(`
+    <div class="card"><h1>📖 قراءة طويلة · B1</h1>
+      <p class="muted">${LANGS[lang].flag} نص من حوالي ${words} كلمة. اقرأه براحتك، وبعدها 4 أسئلة. اضغط على أي كلمة صعبة لشرحها.</p>
+      <button class="primary big" data-act="go">ابدأ القراءة ←</button></div>`, { go: () => done() }));
+  if (!live()) return;
+  await storyScreen(lang, story);
+  if (!live()) return;
+  let correct = 0;
+  for (const [i, q] of story.questions.entries()) {
+    const above = `<div class="card"><h2 class="ltr">${esc(story.title)}</h2><p class="story ltr" style="font-size:17px;line-height:1.9">${esc(story.text)}</p></div>`;
+    if (await quizCard({ q, idx: i, total: story.questions.length, label: 'فهم المقروء', above })) correct++;
+    if (!live()) return;
+  }
+  const pct = Math.round((correct / story.questions.length) * 100);
+  (S.reads[lang] = S.reads[lang] || []).push(pct); S.reads[lang] = S.reads[lang].slice(-20);
+  touchStreak(); save();
+  view(`
+    <div class="card" style="text-align:center">
+      <h1>📖 خلصت القراءة</h1>
+      <p style="font-size:28px;margin:4px 0">${correct}/${story.questions.length} (${pct}%)</p>
+      <p class="muted">${pct >= 75 ? 'ممتاز! فهمت النص الطويل.' : 'أعد قراءة النص ببطء، وركّز على الكلمات المفتاحية قبل أن تجيب.'}</p>
+      <div class="feedback">${esc(story.translation_ar)}</div>
+      <div class="row" style="justify-content:center"><a class="btn primary" href="#/read/${lang}" onclick="setTimeout(route,0)">نص آخر</a><a class="btn" href="#/">الرئيسية</a></div>
+    </div>`);
 }
 
 // ---------- mock exam ----------
@@ -948,6 +982,7 @@ function route() {
     case 'session': return run(session(lang, live));
     case 'civics': return run(civics(live));
     case 'words': return run(words(live));
+    case 'read': return LANGS[arg] ? run(readLong(arg, live)) : home();
     case 'exam': return LANGS[arg] ? run(exam(arg, live)) : examMenu();
     case 'listen': return LANGS[arg] && ['a', 'b', 'c'].includes(arg2) ? run(listen(arg, arg2, live)) : listenMenu();
     case 'dialogues': return dialogues(LANGS[arg] ? arg : '', arg2);
