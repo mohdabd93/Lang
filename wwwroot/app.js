@@ -22,6 +22,7 @@ const defaults = () => ({
   streak: { count: 0, last: '' },
   cards: [], civics: [], sessions: 0,
   seen: { el: [], en: [] },
+  seenListen: { el: [], en: [] }, listen: { el: [], en: [] },
 });
 function load() {
   try {
@@ -68,7 +69,7 @@ function view(html, handlers = {}) {
 // Run a render function that resolves a promise when the user moves on.
 const step = render => new Promise(resolve => render(resolve));
 
-function speakLines(texts, lang) {
+function speakLines(texts, lang, rate = 0.85) {
   if (!('speechSynthesis' in window)) return toast('المتصفح لا يدعم النطق');
   const voices = speechSynthesis.getVoices();
   const code = LANGS[lang].tts.slice(0, 2);
@@ -76,11 +77,14 @@ function speakLines(texts, lang) {
   speechSynthesis.cancel();
   for (const t of texts) {
     const u = new SpeechSynthesisUtterance(t);
-    u.lang = LANGS[lang].tts; u.rate = 0.85;
+    u.lang = LANGS[lang].tts; u.rate = rate;
     speechSynthesis.speak(u);
   }
 }
-const speak = (text, lang) => speakLines([text], lang);
+const speak = (text, lang, rate) => speakLines([text], lang, rate);
+// Voices load asynchronously: an empty list means "unknown", which we treat as available.
+const hasVoice = lang => 'speechSynthesis' in window && (!speechSynthesis.getVoices().length ||
+  speechSynthesis.getVoices().some(v => v.lang.toLowerCase().startsWith(LANGS[lang].tts.slice(0, 2))));
 
 function touchStreak() {
   const t = today(), s = S.streak;
@@ -219,6 +223,11 @@ function home() {
     </div>
     ${langCard('el')}
     ${langCard('en')}
+    <div class="card">
+      <h2>🎧 تمرين استماع</h2>
+      <p class="muted">اسمع الجملة أو القصة بدون نص، واختر المعنى أو اكتب اللي سمعته.</p>
+      <a class="btn primary" href="#/listen">ابدأ</a>
+    </div>
     <div class="card">
       <h2>🎭 حوارات عملية</h2>
       <p class="muted">مقابلة عمل، شقة، راتب، دكتور، دائرة حكومية، طوارئ. اقرأ، واستمع، ثم تدرّب على دورك.</p>
@@ -497,6 +506,166 @@ async function words(live) {
   draw();
 }
 
+// ---------- listening ----------
+const normText = t => t.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/ς/g, 'σ')
+  .replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+
+const stopSpeech = () => { try { speechSynthesis.cancel(); } catch { /* unsupported */ } };
+
+function listenPool(lang) {
+  const pool = [];
+  for (const d of BANK.dialogues[lang]) for (const l of d.lines) pool.push({ t: l.t, a: l.a });
+  if (lang === 'el') for (const g of BANK.survive) for (const it of g.items) pool.push({ t: it.g, a: it.a });
+  return [...new Map(pool.map(x => [x.t, x])).values()];
+}
+const sample = (arr, n) => [...arr].sort(() => Math.random() - 0.5).slice(0, n);
+
+function listenMenu() {
+  const row = l => `
+    <div class="card">
+      <h2>${LANGS[l].flag} ${LANGS[l].name}</h2>
+      ${hasVoice(l) ? '' : `<div class="warn">ما لقيت صوتًا للغة ${LANGS[l].name} على جهازك. بدون صوت ما بيشتغل التمرين. على Windows: الإعدادات ← الوقت واللغة ← اللغة، أضف ${LANGS[l].name} ونزّل حزمة الكلام.</div><br>`}
+      <div class="row">
+        <a class="btn primary" href="#/listen/${l}/a">اسمع واختر المعنى</a>
+        <a class="btn" href="#/listen/${l}/b">اسمع واكتب</a>
+        <a class="btn" href="#/listen/${l}/c">قصة بدون نص</a>
+      </div>
+      <p><button data-act="test" data-l="${l}">🔊 جرّب الصوت</button></p>
+    </div>`;
+  view(`<h1>🎧 تمرين استماع</h1>
+    <p class="muted">نصيحة: استخدم سماعات، واستمع أكثر من مرة قبل ما تجاوب. زر 🐢 بيبطّئ الصوت.</p>
+    ${Object.keys(LANGS).map(row).join('')}`, {
+    test: b => speak(b.dataset.l === 'el' ? 'Καλημέρα, τι κάνετε;' : 'Good morning, how are you?', b.dataset.l),
+  });
+}
+
+// One "hear it, pick the meaning" question; resolves true/false.
+function listenChoice({ lang, item, options, idx, total }) {
+  return step(done => {
+    let correct = false;
+    view(`
+      <div class="progress"><i style="width:${(idx / total) * 100}%"></i></div>
+      <div class="card">
+        <div class="muted">استماع ${idx + 1}/${total}</div>
+        <div class="row" style="justify-content:center;margin:12px 0"><button class="primary big" data-act="play">▶ استمع</button><button data-act="slow">🐢 أبطأ</button></div>
+        <p class="muted">شو معنى الجملة؟</p>
+        <div class="opts">${options.map((o, i) => `<button data-act="pick" data-i="${i}" style="direction:rtl">${esc(o)}</button>`).join('')}</div>
+        <div id="fb"></div>
+      </div>`, {
+      play: () => speak(item.t, lang),
+      slow: () => speak(item.t, lang, 0.55),
+      pick(btn) {
+        const ok = options[+btn.dataset.i] === item.a;
+        correct = ok;
+        $app.querySelectorAll('.opts button').forEach(b => { b.disabled = true; if (options[+b.dataset.i] === item.a) b.classList.add('ok'); });
+        if (!ok) btn.classList.add('bad');
+        document.getElementById('fb').innerHTML =
+          `<div class="feedback ${ok ? 'ok' : 'bad'}">${ok ? '✅ صح!' : '❌ مو صح'}<div class="ltr"><b>${esc(item.t)}</b></div></div>
+           <button class="primary" data-act="next">التالي ←</button>`;
+      },
+      next: () => done(correct),
+    });
+    speak(item.t, lang);
+  });
+}
+
+// One dictation: hear a phrase and type it. Accents/punctuation/case are ignored when checking.
+function dictation({ lang, item, idx, total }) {
+  return step(done => {
+    let correct = false;
+    view(`
+      <div class="progress"><i style="width:${(idx / total) * 100}%"></i></div>
+      <div class="card">
+        <div class="muted">إملاء ${idx + 1}/${total}</div>
+        <div class="row" style="justify-content:center;margin:12px 0"><button class="primary big" data-act="play">▶ استمع</button><button data-act="slow">🐢 أبطأ</button></div>
+        <input type="text" id="ans" class="ltr" autocomplete="off" autocapitalize="off" spellcheck="false" lang="${lang}" aria-label="اكتب ما سمعته">
+        <p class="muted">اكتب اللي سمعته. التشكيل (علامات النبر) وعلامات الترقيم غير مهمة هون.</p>
+        <div class="row"><button class="primary" data-act="chk">تحقّق</button><button data-act="skip">تخطّي</button></div>
+        <div id="fb"></div>
+      </div>`, {
+      play: () => speak(item.t, lang),
+      slow: () => speak(item.t, lang, 0.55),
+      chk() {
+        const typed = normText(document.getElementById('ans').value).split(' ').filter(Boolean);
+        if (!typed.length) return toast('اكتب شيئًا أولًا');
+        const words = item.t.split(/\s+/);
+        const exp = words.map(w => normText(w)).filter(Boolean);
+        correct = typed.join(' ') === exp.join(' ');
+        const shown = words.map((w, i) => {
+          const same = !normText(w) || normText(w) === (typed[i] || '');
+          return `<span style="${same ? '' : 'color:var(--bad);font-weight:600;text-decoration:underline'}">${esc(w)}</span>`;
+        }).join(' ');
+        document.getElementById('fb').innerHTML =
+          `<div class="feedback ${correct ? 'ok' : 'bad'}">${correct ? '✅ ممتاز!' : '❌ قارن:'}<div class="ltr" style="font-size:19px">${shown}</div><div>${esc(item.a)}</div></div>
+           <button class="primary" data-act="next">التالي ←</button>`;
+        document.querySelector('[data-act=chk]').disabled = true;
+      },
+      skip: () => done(false),
+      next: () => done(correct),
+    });
+    speak(item.t, lang);
+  });
+}
+
+async function listen(lang, mode, live) {
+  const total = 8;
+  let right = 0, count = 0, label = '';
+  if (mode === 'c') {
+    label = 'قصة بدون نص';
+    const story = await api('story', { lang, level: levelName(lang), topic: '', words: [], seen: S.seenListen[lang] });
+    if (!live()) return;
+    if (story.id) { S.seenListen[lang] = [...S.seenListen[lang].filter(i => i !== story.id), story.id].slice(-40); save(); }
+    await step(done => view(`
+      <div class="card" style="text-align:center">
+        <h2>🎧 استمع للقصة</h2>
+        <p class="muted">النص مخفي. استمع أكثر من مرة إذا بدك، وبعدها جاوب على الأسئلة.</p>
+        <div class="row" style="justify-content:center"><button class="primary big" data-act="play">▶ استمع</button><button data-act="slow">🐢 أبطأ</button></div>
+        <p><button class="primary" data-act="go">جاهز للأسئلة ←</button></p>
+      </div>`, {
+      play: () => speak(story.text, lang), slow: () => speak(story.text, lang, 0.55), go: () => done(),
+    }));
+    stopSpeech();
+    if (!live()) return;
+    count = story.questions.length;
+    for (const [i, q] of story.questions.entries()) {
+      if (await quizCard({ q, idx: i, total: count, label: 'سؤال' })) right++;
+      if (!live()) return;
+    }
+    await step(done => view(`
+      <div class="card"><h2 class="ltr">${esc(story.title)}</h2><p class="story ltr">${esc(story.text)}</p>
+        <div class="feedback">${esc(story.translation_ar)}</div>
+        <div class="row"><button data-act="say">🔊 استمع مع النص</button><button class="primary" data-act="ok">متابعة ←</button></div></div>`, {
+      say: () => speak(story.text, lang), ok: () => done(),
+    }));
+    if (!live()) return;
+  } else {
+    const pool = listenPool(lang).filter(x => mode !== 'b' || x.t.split(/\s+/).length <= 9);
+    const items = sample(pool, total);
+    count = items.length;
+    label = mode === 'a' ? 'اسمع واختر المعنى' : 'اسمع واكتب';
+    for (const [i, item] of items.entries()) {
+      let ok;
+      if (mode === 'a') {
+        const others = sample([...new Set(listenPool(lang).map(x => x.a))].filter(a => a !== item.a), 3);
+        ok = await listenChoice({ lang, item, options: sample([item.a, ...others], 4), idx: i, total: count });
+      } else ok = await dictation({ lang, item, idx: i, total: count });
+      if (!live()) return;
+      if (ok) right++;
+    }
+  }
+  stopSpeech();
+  const pct = Math.round((right / count) * 100);
+  (S.listen[lang] = S.listen[lang] || []).push(pct); S.listen[lang] = S.listen[lang].slice(-20);
+  touchStreak(); save();
+  view(`
+    <div class="card" style="text-align:center">
+      <h1>🎧 ${esc(label)}</h1>
+      <p style="font-size:28px;margin:4px 0">${right}/${count} (${pct}%)</p>
+      <p class="muted">${pct >= 80 ? 'ممتاز! أذنك تتحسن.' : pct >= 50 ? 'جيد. كرّر التمرين وركّز على الجمل اللي غلطت فيها.' : 'طبيعي بالبداية. استخدم زر 🐢 وكرّر الاستماع.'}</p>
+      <div class="row" style="justify-content:center"><a class="btn primary" href="#/listen/${lang}/${mode}" onclick="setTimeout(route,0)">مرة ثانية</a><a class="btn" href="#/listen">تمارين أخرى</a><a class="btn" href="#/">الرئيسية</a></div>
+    </div>`);
+}
+
 function dialogues(lang, id) {
   const d = lang && (BANK.dialogues[lang] || []).find(x => x.id === id);
   if (!d) {
@@ -628,6 +797,7 @@ function route() {
     case 'session': return run(session(lang, live));
     case 'civics': return run(civics(live));
     case 'words': return run(words(live));
+    case 'listen': return LANGS[arg] && ['a', 'b', 'c'].includes(arg2) ? run(listen(arg, arg2, live)) : listenMenu();
     case 'dialogues': return dialogues(LANGS[arg] ? arg : '', arg2);
     case 'survive': return survive(arg);
     case 'settings': return settings();
