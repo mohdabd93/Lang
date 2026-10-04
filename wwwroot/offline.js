@@ -32,10 +32,11 @@ const Offline = (() => {
     return mc(pickOne(bank[order[0]]));
   }
 
-  // long: only the long reading texts (B1); otherwise every story of the level.
+  // long: only the long reading texts of that level; otherwise every story of the level.
   function story({ lang, level, seen = [], long = false }) {
     const bank = BANK[lang].stories;
-    const l = long ? 'B1' : byDistance(base(level)).find(x => bank[x]);
+    // long texts exist at B1 (both languages) and B2 (English): fall back to B1 if the level has none.
+    const l = long ? (bank[base(level)]?.some(s => s.long) ? base(level) : 'B1') : byDistance(base(level)).find(x => bank[x]);
     const all = long ? bank[l].filter(s => s.long) : bank[l];
     const unseen = all.filter(s => !seen.includes(s.id));
     const s = pickOne(unseen.length ? unseen : all);

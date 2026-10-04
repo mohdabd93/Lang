@@ -215,7 +215,7 @@ function home() {
       <div class="row">
         <a class="btn ${S.placed[lang] ? 'primary' : ''}" href="#/session/${lang}">▶ جلسة اليوم</a>
         <a class="btn ${S.placed[lang] ? '' : 'primary'}" href="#/placement/${lang}">${S.placed[lang] ? 'أعد تحديد المستوى' : 'حدّد مستواي'}</a>
-        <a class="btn" href="#/read/${lang}">📖 قراءة طويلة</a>
+        ${LONG_LEVELS[lang].map(l => `<a class="btn" href="#/read/${lang}/${l.toLowerCase()}">📖 قراءة طويلة · ${l}</a>`).join('')}
       </div>
     </div>`;
   view(`
@@ -515,14 +515,15 @@ async function words(live) {
   draw();
 }
 
-// ---------- long reading (B1) ----------
-async function readLong(lang, live) {
-  const story = Offline.story({ lang, level: 'B1', seen: S.seenLong[lang], long: true });
+// ---------- long reading ----------
+const LONG_LEVELS = { el: ['B1'], en: ['B1', 'B2'] };
+async function readLong(lang, level, live) {
+  const story = Offline.story({ lang, level, seen: S.seenLong[lang], long: true });
   S.seenLong[lang] = [...S.seenLong[lang].filter(id => id !== story.id), story.id].slice(-40);
   save();
   const words = story.text.split(/\s+/).length;
   await step(done => view(`
-    <div class="card"><h1>📖 قراءة طويلة · B1</h1>
+    <div class="card"><h1>📖 قراءة طويلة · ${esc(level)}</h1>
       <p class="muted">${LANGS[lang].flag} نص من حوالي ${words} كلمة. اقرأه براحتك، وبعدها 4 أسئلة. اضغط على أي كلمة صعبة لشرحها.</p>
       <button class="primary big" data-act="go">ابدأ القراءة ←</button></div>`, { go: () => done() }));
   if (!live()) return;
@@ -543,7 +544,7 @@ async function readLong(lang, live) {
       <p style="font-size:28px;margin:4px 0">${correct}/${story.questions.length} (${pct}%)</p>
       <p class="muted">${pct >= 75 ? 'ممتاز! فهمت النص الطويل.' : 'أعد قراءة النص ببطء، وركّز على الكلمات المفتاحية قبل أن تجيب.'}</p>
       <div class="feedback">${esc(story.translation_ar)}</div>
-      <div class="row" style="justify-content:center"><a class="btn primary" href="#/read/${lang}" onclick="setTimeout(route,0)">نص آخر</a><a class="btn" href="#/">الرئيسية</a></div>
+      <div class="row" style="justify-content:center"><a class="btn primary" href="#/read/${lang}/${level.toLowerCase()}" onclick="setTimeout(route,0)">نص آخر</a><a class="btn" href="#/">الرئيسية</a></div>
     </div>`);
 }
 
@@ -982,7 +983,10 @@ function route() {
     case 'session': return run(session(lang, live));
     case 'civics': return run(civics(live));
     case 'words': return run(words(live));
-    case 'read': return LANGS[arg] ? run(readLong(arg, live)) : home();
+    case 'read': {
+      const level = (arg2 || 'b1').toUpperCase();
+      return LANGS[arg] && LONG_LEVELS[arg].includes(level) ? run(readLong(arg, level, live)) : home();
+    }
     case 'exam': return LANGS[arg] ? run(exam(arg, live)) : examMenu();
     case 'listen': return LANGS[arg] && ['a', 'b', 'c'].includes(arg2) ? run(listen(arg, arg2, live)) : listenMenu();
     case 'dialogues': return dialogues(LANGS[arg] ? arg : '', arg2);
