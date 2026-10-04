@@ -1,10 +1,10 @@
 'use strict';
 
 // ---------- constants ----------
-const LEVELS = ['A1', 'A1+', 'A2', 'A2+', 'B1', 'B1+', 'B2'];
+const LEVELS = { el: ['A1', 'A2', 'B1'], en: ['A1', 'A2', 'B1', 'B2'] };
 const LANGS = {
-  el: { name: 'اليونانية', tts: 'el-GR', flag: '🇬🇷', start: 1 },
-  en: { name: 'الإنجليزية', tts: 'en-US', flag: '🇬🇧', start: 3 },
+  el: { name: 'اليونانية', tts: 'el-GR', flag: '🇬🇷', start: 0 },
+  en: { name: 'الإنجليزية', tts: 'en-US', flag: '🇬🇧', start: 1 },
 };
 const TOPICS = ['daily life', 'family', 'food and shopping', 'health and the doctor', 'work', 'travel and transport',
   'the weather', 'housing', 'public services and offices', 'holidays and traditions', 'friends and hobbies'];
@@ -21,11 +21,16 @@ const defaults = () => ({
   recent: { el: [], en: [] },
   streak: { count: 0, last: '' },
   cards: [], civics: [], sessions: 0,
+  seen: { el: [], en: [] },
 });
 function load() {
   try {
     const s = JSON.parse(localStorage.getItem(LS_KEY));
-    if (s && typeof s === 'object') return { ...defaults(), ...s };
+    if (s && typeof s === 'object') {
+      const st = { ...defaults(), ...s };
+      for (const l of Object.keys(LANGS)) st.level[l] = Math.max(0, Math.min(LEVELS[l].length - 1, st.level[l] | 0));
+      return st;
+    }
   } catch { /* storage unavailable or corrupt */ }
   return defaults();
 }
@@ -39,7 +44,8 @@ const parseDay = s => { const [y, m, d] = s.split('-').map(Number); return Date.
 const dayDiff = (a, b) => Math.round((parseDay(b) - parseDay(a)) / 864e5);
 const addDays = (s, n) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d + n).toLocaleDateString('en-CA'); };
 const pick = a => a[Math.floor(Math.random() * a.length)];
-const levelName = (lang) => LEVELS[S.level[lang]];
+const maxLevel = lang => LEVELS[lang].length - 1;
+const levelName = lang => LEVELS[lang][S.level[lang]];
 const lvlHtml = l => `<bdi dir="ltr">${l}</bdi>`; // keeps "A2+" from flipping inside RTL text
 const spinner = msg => `<div class="spinner">⏳ ${esc(msg)}</div>`;
 
@@ -82,12 +88,15 @@ function touchStreak() {
 const streakNow = () => (S.streak.last && dayDiff(S.streak.last, today()) <= 2 ? S.streak.count : 0);
 
 // ---------- API ----------
+// 'offline' = built-in content bank (no server needed); 'ai' = server has a Claude key.
+let MODE = 'offline';
 const ERRORS = {
   ai_unavailable: 'خدمة الذكاء الاصطناعي غير متاحة الآن، جرّب بعد قليل.',
   ai_bad_format: 'الذكاء الاصطناعي رجّع رد غير مفهوم، جرّب مرة ثانية.',
   ai_timeout: 'الرد تأخر كثير، جرّب مرة ثانية.',
 };
 async function api(task, body) {
+  if (MODE === 'offline') return Offline[task](body);
   for (let attempt = 0; ; attempt++) {
     let res;
     try {
@@ -208,6 +217,11 @@ function home() {
     ${langCard('el')}
     ${langCard('en')}
     <div class="card">
+      <h2>🆘 جمل البقاء باليونانية</h2>
+      <p class="muted">العقد، الراتب، البيت، الدكتور، الدوائر، الطوارئ: الجمل اللي بتحتاجها فعلًا.</p>
+      <a class="btn primary" href="#/survive">افتح</a>
+    </div>
+    <div class="card">
       <h2>🏛️ اختبار الجنسية (تاريخ وثقافة)</h2>
       <p class="muted">${civAvg === null ? 'ما جرّبت بعد.' : `معدّل آخر ${civ.length} محاولات: ${civAvg}%`}</p>
       <a class="btn" href="#/civics">تدرّب على الأسئلة</a>
@@ -221,16 +235,16 @@ async function placement(lang, live) {
     let q;
     for (;;) {
       view(spinner('جاري تجهيز السؤال...'));
-      try { q = await api('placement', { lang, level: LEVELS[stepIdx], asked }); break; }
+      try { q = await api('placement', { lang, level: LEVELS[lang][stepIdx], asked }); break; }
       catch (e) { await step(r => failScreen(e, r)); }
     }
     if (!live()) return;
     asked.push(q.question); steps.push(stepIdx);
     const ok = await quizCard({ q, idx: n, total, label: 'سؤال' });
     if (!live()) return;
-    stepIdx = Math.max(0, Math.min(LEVELS.length - 1, stepIdx + (ok ? 1 : -1)));
+    stepIdx = Math.max(0, Math.min(maxLevel(lang), stepIdx + (ok ? 1 : -1)));
   }
-  const tail = [...steps.slice(3), stepIdx];
+  const tail = [...steps.slice(2), stepIdx];
   S.level[lang] = Math.round(tail.reduce((a, b) => a + b, 0) / tail.length);
   S.placed[lang] = true; S.recent[lang] = [];
   save();
@@ -246,7 +260,7 @@ function adapt(lang, pct) {
   const r = S.recent[lang];
   r.push(pct); if (r.length > 3) r.shift();
   const avg = r.reduce((a, b) => a + b, 0) / r.length;
-  if (r.length >= 2 && avg >= 85 && S.level[lang] < LEVELS.length - 1) { S.level[lang]++; r.length = 0; return 'up'; }
+  if (r.length >= 2 && avg >= 85 && S.level[lang] < maxLevel(lang)) { S.level[lang]++; r.length = 0; return 'up'; }
   if (r.length >= 2 && avg < 55 && S.level[lang] > 0) { S.level[lang]--; r.length = 0; return 'down'; }
   return '';
 }
@@ -296,7 +310,7 @@ function storyScreen(lang, story) {
           <p>${esc(r.meaning_ar)}</p>
           ${r.note_ar ? `<p class="muted">${esc(r.note_ar)}</p>` : ''}
           ${r.example ? `<p class="ltr">${esc(r.example)}<br><span class="muted">${esc(r.example_ar || '')}</span></p>` : ''}
-          <div class="row"><button data-act="padd">＋ أضف للمراجعة</button><button data-act="psay">🔊</button><button data-act="pclose">إغلاق</button></div></div>`;
+          <div class="row">${r.unknown ? '' : '<button data-act="padd">＋ أضف للمراجعة</button>'}<button data-act="psay">🔊</button><button data-act="pclose">إغلاق</button>${r.link ? `<a class="btn" href="${esc(r.link)}" target="_blank" rel="noopener">ترجمة جوجل ↗</a>` : ''}</div></div>`;
         popData = { lemma: r.lemma || word, meaning: r.meaning_ar };
       } catch (e) { if (token === popToken) pop.innerHTML = `<div class="card pop">${esc(e.message)}</div>`; }
     },
@@ -308,7 +322,31 @@ function storyScreen(lang, story) {
 }
 let popData = { lemma: '', meaning: '' };
 
+async function offlineWritingStep(lang) {
+  const w = await api('writing', { lang, level: levelName(lang) });
+  return step(done => view(`
+    <div class="card">
+      <h2>✍️ تمرين كتابة</h2>
+      <p>${esc(w.prompt_ar)} <span class="muted">(بال${LANGS[lang].name})</span></p>
+      <textarea class="ltr" id="txt" maxlength="1000" lang="${lang}"></textarea>
+      <div class="row" style="margin-top:10px"><button class="primary" data-act="cmp">قارن مع جواب نموذجي</button><button data-act="skip">تخطّي</button></div>
+      <div id="out"></div>
+    </div>`, {
+    skip: () => done(null),
+    cmp() {
+      if (!document.getElementById('txt').value.trim()) return toast('اكتب شيئًا أولًا');
+      document.getElementById('out').innerHTML = `
+        <div class="feedback ok ltr"><b>${esc(w.model)}</b></div>
+        <p class="muted">قارن كتابتك بالنموذج: هل الأفعال والأزمنة صحيحة؟ هل ترتيب الكلمات مشابه؟ هل في كلمة تعلّمتها وتقدر تستخدمها؟</p>
+        <div class="row"><button data-act="say">🔊 استمع</button><button class="primary" data-act="fin">متابعة ←</button></div>`;
+    },
+    say: () => speak(w.model, lang),
+    fin: () => done(w),
+  }));
+}
+
 async function writingStep(lang, story) {
+  if (MODE === 'offline') return offlineWritingStep(lang);
   const prompt = `اكتب 2-3 جمل عن القصة أو عن يومك (بال${LANGS[lang].name})`;
   const result = await step(done => { let last = null; view(`
     <div class="card">
@@ -354,12 +392,13 @@ async function session(lang, live) {
   let story;
   for (;;) {
     view(spinner('جاري كتابة قصة بمستواك...'));
-    try { story = await api('story', { lang, level: levelName(lang), topic: pick(TOPICS), words: weak }); break; }
+    try { story = await api('story', { lang, level: levelName(lang), topic: pick(TOPICS), words: weak, seen: S.seen[lang] }); break; }
     catch (e) { await step(r => failScreen(e, r)); }
     if (!live()) return;
   }
   if (!live()) return;
 
+  if (story.id) { S.seen[lang] = [...S.seen[lang].filter(id => id !== story.id), story.id].slice(-40); save(); }
   const added = await storyScreen(lang, story);
   if (!live()) return;
 
@@ -393,7 +432,7 @@ async function civics(live) {
   const params = await step(done => view(`
     <h1>🏛️ تدرّب على اختبار الجنسية</h1>
     <div class="card">
-      <div class="warn">الأسئلة مولّدة بالذكاء الاصطناعي لتتعوّد على الأسلوب. اعتمد دائمًا على مادة الدراسة الرسمية، وتأكد من أي معلومة بتشك فيها.</div>
+      <div class="warn">هذه أسئلة تدريب لتتعوّد على الأسلوب، وليست بنك الأسئلة الرسمي. اعتمد دائمًا على مادة الدراسة الرسمية، وتأكد من أي معلومة بتشك فيها.</div>
       <label for="topic">الموضوع</label>
       <select id="topic">
         <option value="mixed">منوّع</option><option value="history">التاريخ</option><option value="geography">الجغرافيا</option>
@@ -448,6 +487,35 @@ async function words(live) {
     });
   };
   draw();
+}
+
+function survive(id) {
+  const g = BANK.survive.find(x => x.id === id);
+  if (!g) {
+    return view(`
+      <h1>🆘 جمل البقاء</h1>
+      <p class="muted">جمل قصيرة وجاهزة للمواقف اللي بتحتاج فيها تحمي حالك وتتفاهم. اضغط 🔊 لتسمع النطق، و＋ لتضيفها لمراجعتك.</p>
+      ${BANK.survive.map(x => `<a class="card" style="display:block;color:inherit" href="#/survive/${x.id}"><b>${esc(x.title)}</b> <span class="muted">(${x.items.length})</span></a>`).join('')}
+      <p class="muted">النطق بالحروف العربية تقريبي. اعتمد على زر 🔊. هذا القسم للغة فقط وليس نصيحة قانونية. للمشاكل القانونية استشر جهة مختصة.</p>`);
+  }
+  view(`
+    <p><a href="#/survive">← كل المواقف</a></p>
+    <h1>${esc(g.title)}</h1>
+    ${g.note ? `<div class="warn">${esc(g.note)}</div><br>` : ''}
+    ${g.items.map((it, i) => `
+      <div class="card">
+        <div class="story ltr" style="font-size:20px;line-height:1.6"><b>${esc(it.g)}</b></div>
+        <div>${esc(it.a)}</div>
+        <div class="muted">🗣️ ${esc(it.p)}</div>
+        <div class="row" style="margin-top:8px"><button data-act="say" data-i="${i}">🔊</button><button data-act="add" data-i="${i}">＋ مراجعة</button></div>
+      </div>`).join('')}`, {
+    say: b => speak(g.items[+b.dataset.i].g, 'el'),
+    add(b) {
+      const it = g.items[+b.dataset.i];
+      toast(addCard('el', it.g, it.a) ? 'انضافت للمراجعة' : 'موجودة من قبل');
+      b.textContent = '✓'; b.disabled = true;
+    },
+  });
 }
 
 function settings() {
@@ -505,6 +573,7 @@ function route() {
     case 'session': return run(session(lang, live));
     case 'civics': return run(civics(live));
     case 'words': return run(words(live));
+    case 'survive': return survive(arg);
     case 'settings': return settings();
     default: return home();
   }
@@ -514,8 +583,7 @@ window.addEventListener('hashchange', route);
 async function boot() {
   try {
     const st = await (await fetch('/api/status')).json();
-    if (st.demo) document.getElementById('banner').innerHTML =
-      '<div class="warn">وضع تجريبي: المحتوى جاهز مسبقًا. أضف مفتاح Claude API على السيرفر ليشتغل الذكاء الاصطناعي فعليًا.</div>';
+    if (!st.demo) MODE = 'ai';
   } catch { /* offline: ignore */ }
   route();
 }
