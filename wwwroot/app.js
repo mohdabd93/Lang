@@ -23,6 +23,7 @@ const defaults = () => ({
   cards: [], civics: [], sessions: 0,
   seen: { el: [], en: [] },
   seenListen: { el: [], en: [] }, listen: { el: [], en: [] },
+  exams: { el: [], en: [] },
 });
 function load() {
   try {
@@ -136,11 +137,12 @@ const failScreen = (e, retry) => view(
 
 // ---------- quiz building block ----------
 // Shows one multiple-choice question; resolves with true/false after the user taps "next".
-function quizCard({ q, idx, total, label }) {
+function quizCard({ q, idx, total, label, above = '' }) {
   return step(done => {
     let correct = false;
     view(`
       <div class="progress"><i style="width:${(idx / total) * 100}%"></i></div>
+      ${above}
       <div class="card">
         <div class="muted">${esc(label)} ${idx + 1}/${total}</div>
         <h2 class="ltr">${esc(q.question)}</h2>
@@ -223,6 +225,11 @@ function home() {
     </div>
     ${langCard('el')}
     ${langCard('en')}
+    <div class="card">
+      <h2>📝 امتحان تجريبي كامل</h2>
+      <p class="muted">قراءة، قواعد، استماع، كتابة${S.exams.el.length ? ` · آخر نتيجة يونانية: ${S.exams.el[S.exams.el.length - 1].pct}%` : ''}.</p>
+      <a class="btn primary" href="#/exam">افتح</a>
+    </div>
     <div class="card">
       <h2>🎧 تمرين استماع</h2>
       <p class="muted">اسمع الجملة أو القصة بدون نص، واختر المعنى أو اكتب اللي سمعته.</p>
@@ -504,6 +511,150 @@ async function words(live) {
     });
   };
   draw();
+}
+
+// ---------- mock exam ----------
+// Fixed difficulty (B1), content from the built-in bank. Writing is self-assessed and not part of the score.
+const EXAM = {
+  el: { reading: 'B1', grammar: ['A2', 'A2', 'A2', 'A2', 'B1', 'B1', 'B1', 'B1'], writing: 'B1', civics: 8 },
+  en: { reading: 'B1', grammar: ['A2', 'A2', 'B1', 'B1', 'B1', 'B1', 'B2', 'B2'], writing: 'B1', civics: 0 },
+};
+const SECTION_ADVICE = {
+  reading: ['القراءة', l => `#/session/${l}`, 'اقرأ المزيد من القصص في «جلسة اليوم»'],
+  grammar: ['القواعد والمفردات', l => `#/session/${l}`, 'كرّر جلسات اليوم وراجع كلماتك'],
+  listening: ['الاستماع', l => `#/listen/${l}/a`, 'تدرّب على تمارين الاستماع'],
+  civics: ['الثقافة والتاريخ', () => '#/civics', 'تدرّب على أسئلة الجنسية'],
+};
+
+function examMenu() {
+  const card = l => {
+    const h = S.exams[l], last = h[h.length - 1];
+    return `<div class="card">
+      <h2>${LANGS[l].flag} ${LANGS[l].name} <span class="pill">B1</span></h2>
+      <p class="muted">${l === 'el' ? 'قراءة، قواعد ومفردات، استماع، كتابة، وثقافة وتاريخ (٢٥ سؤالًا).' : 'قراءة، قواعد ومفردات، استماع، وكتابة (١٧ سؤالًا).'} حوالي ${l === 'el' ? 25 : 18} دقيقة.</p>
+      ${last ? `<p>آخر نتيجة: <b>${last.pct}%</b> (${esc(last.date)})${h.length > 1 ? ` · المحاولات: ${h.map(x => x.pct + '%').join(' ← ')}` : ''}</p>` : ''}
+      <a class="btn primary" href="#/exam/${l}">${last ? 'امتحان جديد' : 'ابدأ الامتحان'}</a>
+    </div>`;
+  };
+  view(`<h1>📝 امتحان تجريبي</h1>
+    <p class="muted">الامتحان بمستوى B1 ثابت (مو تكيّفي)، حتى تقيس وضعك الحالي. لا تستخدم قاموسًا. بالنهاية بيطلع لك تقرير بنقاط ضعفك.</p>
+    <div class="warn">النتيجة تقدير من التطبيق وليست نتيجة رسمية، وشكل الامتحان الحقيقي وشروط النجاح ممكن تختلف. راجع الجهة المختصة.</div><br>
+    ${Object.keys(LANGS).map(card).join('')}`);
+}
+
+async function exam(lang, live) {
+  const cfg = EXAM[lang];
+  const withListening = hasVoice(lang);
+  const parts = ['reading', 'grammar', ...(withListening ? ['listening'] : []), ...(cfg.civics ? ['civics'] : [])];
+  await step(done => view(`
+    <div class="card">
+      <h1>${LANGS[lang].flag} امتحان تجريبي</h1>
+      <p>الأقسام: ${parts.map(p => SECTION_ADVICE[p][0]).join('، ')}، ثم الكتابة (تقييم ذاتي).</p>
+      ${withListening ? '' : '<div class="warn">ما لقيت صوتًا لهذه اللغة، فبنتخطى الاستماع.</div><br>'}
+      <ul><li>جاوب بهدوء، وما في وقت قاتل.</li><li>لا تستخدم قاموسًا.</li><li>بالنهاية بتشوف أخطاءك مع الجواب الصحيح.</li></ul>
+      <button class="primary big" data-act="go">ابدأ ←</button>
+    </div>`, { go: () => done() }));
+  if (!live()) return;
+
+  const started = Date.now();
+  const score = {}, mistakes = [];
+  const record = (section, q, ok) => {
+    score[section] = score[section] || { right: 0, total: 0 };
+    score[section].total++;
+    if (ok) score[section].right++;
+    else mistakes.push({ section, q: q.question, correct: q.options[q.answerIndex], e: q.explanation_ar || '', heard: q.heard });
+  };
+
+  // reading
+  const story = Offline.story({ lang, level: cfg.reading, seen: [] });
+  for (const [i, q] of story.questions.entries()) {
+    const above = `<div class="card"><h2 class="ltr">${esc(story.title)}</h2><p class="story ltr">${esc(story.text)}</p></div>`;
+    record('reading', q, await quizCard({ q, idx: i, total: story.questions.length, label: 'قراءة', above }));
+    if (!live()) return;
+  }
+
+  // grammar and vocabulary
+  const asked = [];
+  for (const [i, level] of cfg.grammar.entries()) {
+    const q = Offline.placement({ lang, level, asked });
+    asked.push(q.question);
+    record('grammar', q, await quizCard({ q, idx: i, total: cfg.grammar.length, label: 'قواعد ومفردات' }));
+    if (!live()) return;
+  }
+
+  // listening
+  if (withListening) {
+    const pool = listenPool(lang), meanings = [...new Set(pool.map(x => x.a))];
+    const items = sample(pool, 5);
+    for (const [i, item] of items.entries()) {
+      const options = sample([item.a, ...sample(meanings.filter(a => a !== item.a), 3)], 4);
+      const ok = await listenChoice({ lang, item, options, idx: i, total: items.length });
+      record('listening', { question: item.t, options: [item.a], answerIndex: 0 }, ok);
+      if (!live()) return;
+    }
+    stopSpeech();
+  }
+
+  // civics (Greek only)
+  if (cfg.civics) {
+    const { questions } = Offline.civics({ count: cfg.civics, topic: 'mixed' });
+    for (const [i, q] of questions.entries()) {
+      record('civics', q, await quizCard({ q, idx: i, total: questions.length, label: 'ثقافة وتاريخ' }));
+      if (!live()) return;
+    }
+  }
+
+  // writing: self-assessed against a model answer
+  const w = Offline.writing({ lang, level: cfg.writing });
+  const selfScore = await step(done => view(`
+    <div class="card">
+      <h2>✍️ الكتابة</h2>
+      <p>${esc(w.prompt_ar)} <span class="muted">(بال${LANGS[lang].name})</span></p>
+      <textarea class="ltr" id="txt" maxlength="1000" lang="${lang}"></textarea>
+      <p><button class="primary" data-act="cmp">قارن مع جواب نموذجي</button> <button data-act="skip">تخطّي</button></p>
+      <div id="out"></div>
+    </div>`, {
+    skip: () => done(null),
+    cmp() {
+      if (!document.getElementById('txt').value.trim()) return toast('اكتب شيئًا أولًا');
+      document.getElementById('out').innerHTML = `
+        <div class="feedback ok ltr"><b>${esc(w.model)}</b></div>
+        <p>كيف تقيّم كتابتك مقارنة بالنموذج؟</p>
+        <div class="row"><button data-act="r" data-v="30">قريبة قليلًا</button><button data-act="r" data-v="65">مقبولة</button><button data-act="r" data-v="100">قريبة جدًا</button></div>`;
+    },
+    r: b => done(+b.dataset.v),
+  }));
+  if (!live()) return;
+
+  // report
+  const sections = Object.entries(score).map(([k, v]) => ({ key: k, ...v, pct: Math.round((v.right / v.total) * 100) }));
+  const right = sections.reduce((a, x) => a + x.right, 0), total = sections.reduce((a, x) => a + x.total, 0);
+  const pct = Math.round((right / total) * 100);
+  const prev = S.exams[lang][S.exams[lang].length - 1];
+  const minutes = Math.max(1, Math.round((Date.now() - started) / 60000));
+  S.exams[lang].push({ date: today(), pct, sections: Object.fromEntries(sections.map(x => [x.key, x.pct])), writing: selfScore });
+  S.exams[lang] = S.exams[lang].slice(-20);
+  touchStreak(); save();
+  const weakest = [...sections].sort((a, b) => a.pct - b.pct)[0];
+  const verdict = pct >= 80 ? '🌟 ممتاز! مستواك قوي.' : pct >= 60 ? '👍 جيد وقريب. ركّز على القسم الأضعف.' : '🌱 تحتاج مزيدًا من التدريب، وهذا طبيعي. كرّر الجلسات اليومية.';
+  const [wName, wLink, wTip] = SECTION_ADVICE[weakest.key];
+  view(`
+    <div class="card" style="text-align:center">
+      <h1>${LANGS[lang].flag} نتيجة الامتحان التجريبي</h1>
+      <p style="font-size:34px;margin:0">${pct}%</p>
+      <p class="muted">${right}/${total} · ${minutes} دقيقة${prev ? ` · المرة السابقة ${prev.pct}% (${pct >= prev.pct ? '▲' : '▼'} ${Math.abs(pct - prev.pct)})` : ''}</p>
+      <p>${verdict}</p>
+    </div>
+    <div class="card">
+      <h2>نتائج الأقسام</h2>
+      ${sections.map(x => `<div class="row between"><span>${SECTION_ADVICE[x.key][0]}</span><b>${x.right}/${x.total} (${x.pct}%)</b></div><div class="progress"><i style="width:${x.pct}%"></i></div>`).join('')}
+      ${selfScore !== null ? `<div class="row between"><span>الكتابة (تقييم ذاتي)</span><b>${selfScore}%</b></div><div class="progress"><i style="width:${selfScore}%"></i></div>` : ''}
+      <p class="muted">${weakest.pct === 100 ? 'كل الأقسام ممتازة. كرّر الامتحان بعد أسبوعين وراقب ثباتك.' : `القسم الأضعف: <b>${wName}</b>. <a href="${wLink(lang)}">${wTip} ←</a>`}</p>
+    </div>
+    ${mistakes.length ? `<div class="card"><h2>أخطاؤك (${mistakes.length})</h2>${mistakes.slice(0, 12).map(m => `
+      <div class="feedback bad"><div class="ltr">${esc(m.q)}</div><div class="ltr">✔ <b>${esc(m.correct)}</b></div>${m.e ? `<div>${esc(m.e)}</div>` : ''}</div>`).join('')}</div>` : ''}
+    <div class="row"><a class="btn primary" href="#/exam/${lang}" onclick="setTimeout(route,0)">امتحان جديد</a><a class="btn" href="#/">الرئيسية</a></div>
+    <p class="muted">هذه نتيجة تقديرية من التطبيق وليست نتيجة رسمية.</p>`);
 }
 
 // ---------- listening ----------
@@ -797,6 +948,7 @@ function route() {
     case 'session': return run(session(lang, live));
     case 'civics': return run(civics(live));
     case 'words': return run(words(live));
+    case 'exam': return LANGS[arg] ? run(exam(arg, live)) : examMenu();
     case 'listen': return LANGS[arg] && ['a', 'b', 'c'].includes(arg2) ? run(listen(arg, arg2, live)) : listenMenu();
     case 'dialogues': return dialogues(LANGS[arg] ? arg : '', arg2);
     case 'survive': return survive(arg);
