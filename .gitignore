@@ -1,0 +1,8 @@
+bin/
+obj/
+publish/
+.vs/
+appsettings.Local.json
+appsettings.Production.json
+*.user
+node_modules/

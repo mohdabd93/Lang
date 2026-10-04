@@ -1,0 +1,522 @@
+'use strict';
+
+// ---------- constants ----------
+const LEVELS = ['A1', 'A1+', 'A2', 'A2+', 'B1', 'B1+', 'B2'];
+const LANGS = {
+  el: { name: 'اليونانية', tts: 'el-GR', flag: '🇬🇷', start: 1 },
+  en: { name: 'الإنجليزية', tts: 'en-US', flag: '🇬🇧', start: 3 },
+};
+const TOPICS = ['daily life', 'family', 'food and shopping', 'health and the doctor', 'work', 'travel and transport',
+  'the weather', 'housing', 'public services and offices', 'holidays and traditions', 'friends and hobbies'];
+const BOX_DAYS = [0, 1, 3, 7, 14, 30]; // Leitner intervals by box (1..5)
+const LS_KEY = 'lang-app-v1';
+
+const $app = document.getElementById('app');
+
+// ---------- state ----------
+const defaults = () => ({
+  examDate: '', passcode: '',
+  level: { el: LANGS.el.start, en: LANGS.en.start },
+  placed: { el: false, en: false },
+  recent: { el: [], en: [] },
+  streak: { count: 0, last: '' },
+  cards: [], civics: [], sessions: 0,
+});
+function load() {
+  try {
+    const s = JSON.parse(localStorage.getItem(LS_KEY));
+    if (s && typeof s === 'object') return { ...defaults(), ...s };
+  } catch { /* storage unavailable or corrupt */ }
+  return defaults();
+}
+let S = load();
+function save() { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch { /* ignore */ } }
+
+// ---------- helpers ----------
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const today = () => new Date().toLocaleDateString('en-CA');
+const parseDay = s => { const [y, m, d] = s.split('-').map(Number); return Date.UTC(y, m - 1, d); };
+const dayDiff = (a, b) => Math.round((parseDay(b) - parseDay(a)) / 864e5);
+const addDays = (s, n) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d + n).toLocaleDateString('en-CA'); };
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const levelName = (lang) => LEVELS[S.level[lang]];
+const lvlHtml = l => `<bdi dir="ltr">${l}</bdi>`; // keeps "A2+" from flipping inside RTL text
+const spinner = msg => `<div class="spinner">⏳ ${esc(msg)}</div>`;
+
+let toastTimer;
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+// Render html into #app; handlers map data-act -> fn(element, event).
+function view(html, handlers = {}) {
+  $app.innerHTML = html;
+  $app.onclick = e => {
+    const el = e.target.closest('[data-act]');
+    if (el && handlers[el.dataset.act]) handlers[el.dataset.act](el, e);
+  };
+  window.scrollTo(0, 0);
+}
+// Run a render function that resolves a promise when the user moves on.
+const step = render => new Promise(resolve => render(resolve));
+
+function speak(text, lang) {
+  if (!('speechSynthesis' in window)) return toast('المتصفح لا يدعم النطق');
+  const voices = speechSynthesis.getVoices();
+  const code = LANGS[lang].tts.slice(0, 2);
+  if (voices.length && !voices.some(v => v.lang.toLowerCase().startsWith(code))) toast(`ما في صوت للغة ${LANGS[lang].name} على جهازك`);
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = LANGS[lang].tts; u.rate = 0.85;
+  speechSynthesis.speak(u);
+}
+
+function touchStreak() {
+  const t = today(), s = S.streak;
+  if (s.last === t) return;
+  s.count = s.last && dayDiff(s.last, t) <= 2 ? s.count + 1 : 1; // one rest day is allowed
+  s.last = t;
+}
+const streakNow = () => (S.streak.last && dayDiff(S.streak.last, today()) <= 2 ? S.streak.count : 0);
+
+// ---------- API ----------
+const ERRORS = {
+  ai_unavailable: 'خدمة الذكاء الاصطناعي غير متاحة الآن، جرّب بعد قليل.',
+  ai_bad_format: 'الذكاء الاصطناعي رجّع رد غير مفهوم، جرّب مرة ثانية.',
+  ai_timeout: 'الرد تأخر كثير، جرّب مرة ثانية.',
+};
+async function api(task, body) {
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    try {
+      res = await fetch(`/api/${task}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-passcode': S.passcode },
+        body: JSON.stringify(body),
+      });
+    } catch { throw new Error('ما في اتصال بالسيرفر.'); }
+    if (res.status === 401 && attempt === 0) {
+      const p = prompt('أدخل رمز الدخول');
+      if (p === null) throw new Error('تم الإلغاء.');
+      S.passcode = p; save();
+      continue;
+    }
+    if (res.status === 429) throw new Error('طلبات كثيرة، استنى دقيقة وجرّب.');
+    if (!res.ok) {
+      let code = '';
+      try { code = (await res.json()).error; } catch { /* no body */ }
+      throw new Error(ERRORS[code] || (res.status === 401 ? 'رمز الدخول غير صحيح.' : `صار خطأ (${res.status}).`));
+    }
+    return res.json();
+  }
+}
+
+// Shows an error with a retry button; resolves when the user retries.
+const failScreen = (e, retry) => view(
+  `<div class="card"><p>😕 ${esc(e.message)}</p><div class="row"><button class="primary" data-act="retry">إعادة المحاولة</button><a class="btn" href="#/">الرئيسية</a></div></div>`,
+  { retry });
+
+// ---------- quiz building block ----------
+// Shows one multiple-choice question; resolves with true/false after the user taps "next".
+function quizCard({ q, idx, total, label }) {
+  return step(done => {
+    let correct = false;
+    view(`
+      <div class="progress"><i style="width:${(idx / total) * 100}%"></i></div>
+      <div class="card">
+        <div class="muted">${esc(label)} ${idx + 1}/${total}</div>
+        <h2 class="ltr">${esc(q.question)}</h2>
+        <div class="opts">${q.options.map((o, i) => `<button data-act="pick" data-i="${i}">${esc(o)}</button>`).join('')}</div>
+        <div id="fb"></div>
+      </div>`, {
+      pick(btn) {
+        const i = +btn.dataset.i, ok = i === q.answerIndex;
+        correct = ok;
+        const btns = $app.querySelectorAll('.opts button');
+        btns.forEach((b, j) => { b.disabled = true; if (j === q.answerIndex) b.classList.add('ok'); });
+        if (!ok) btn.classList.add('bad');
+        document.getElementById('fb').innerHTML =
+          `<div class="feedback ${ok ? 'ok' : 'bad'}">${ok ? '✅ صح!' : '❌ مو صح'}${q.explanation_ar ? ' — ' + esc(q.explanation_ar) : ''}</div>
+           <button class="primary" data-act="next">التالي ←</button>`;
+      },
+      next: () => done(correct),
+    });
+  });
+}
+
+// ---------- spaced repetition ----------
+const dueCards = lang => S.cards.filter(c => (!lang || c.lang === lang) && c.due <= today());
+function addCard(lang, word, meaning) {
+  word = word.trim();
+  if (!word || S.cards.some(c => c.lang === lang && c.word.toLowerCase() === word.toLowerCase())) return false;
+  S.cards.push({ id: Date.now() + Math.random(), lang, word, meaning, box: 1, due: addDays(today(), 1) });
+  save();
+  return true;
+}
+async function reviewCards(cards, title) {
+  let known = 0;
+  for (const [i, c] of cards.entries()) {
+    const ok = await step(done => {
+      view(`
+        <div class="progress"><i style="width:${(i / cards.length) * 100}%"></i></div>
+        <div class="card">
+          <div class="muted">${esc(title)} ${i + 1}/${cards.length} · ${LANGS[c.lang].flag}</div>
+          <div class="flash">${esc(c.word)}</div>
+          <div class="row" style="justify-content:center"><button data-act="say">🔊 انطق</button></div>
+          <div id="ans" style="text-align:center;margin-top:16px"><button class="primary" data-act="show">اكشف المعنى</button></div>
+        </div>`, {
+        say: () => speak(c.word, c.lang),
+        show() {
+          document.getElementById('ans').innerHTML =
+            `<p style="font-size:22px">${esc(c.meaning)}</p>
+             <div class="row" style="justify-content:center"><button data-act="no">❌ ما عرفتها</button><button class="primary" data-act="yes">✅ عرفتها</button></div>`;
+        },
+        yes: () => done(true), no: () => done(false),
+      });
+    });
+    c.box = ok ? Math.min(5, c.box + 1) : 1;
+    c.due = addDays(today(), BOX_DAYS[c.box]);
+    if (ok) known++;
+    save();
+  }
+  return known;
+}
+
+// ---------- views ----------
+function home() {
+  const days = S.examDate ? dayDiff(today(), S.examDate) : null;
+  const civ = S.civics.slice(-5);
+  const civAvg = civ.length ? Math.round(civ.reduce((a, b) => a + b.pct, 0) / civ.length) : null;
+  const langCard = lang => `
+    <div class="card">
+      <div class="row between"><h2>${LANGS[lang].flag} ${LANGS[lang].name}</h2><span class="pill">المستوى ${lvlHtml(levelName(lang))}</span></div>
+      ${S.placed[lang] ? '' : `<p class="muted">ما حدّدنا مستواك بعد. 10 أسئلة وبنعرف من وين نبدأ.</p>`}
+      <div class="row">
+        <a class="btn ${S.placed[lang] ? 'primary' : ''}" href="#/session/${lang}">▶ جلسة اليوم</a>
+        <a class="btn ${S.placed[lang] ? '' : 'primary'}" href="#/placement/${lang}">${S.placed[lang] ? 'أعد تحديد المستوى' : 'حدّد مستواي'}</a>
+      </div>
+    </div>`;
+  view(`
+    <h1>أهلًا 👋</h1>
+    <div class="stats">
+      <div class="stat"><b>🔥 ${streakNow()}</b><span>أيام متواصلة</span></div>
+      <div class="stat"><b>${days === null ? '—' : days < 0 ? '0' : days}</b><span>${days === null ? '<a href="#/settings">حدّد موعد الاختبار</a>' : 'يوم للاختبار'}</span></div>
+      <div class="stat"><b>${dueCards().length}</b><span><a href="#/words">كلمات للمراجعة</a></span></div>
+    </div>
+    ${langCard('el')}
+    ${langCard('en')}
+    <div class="card">
+      <h2>🏛️ اختبار الجنسية (تاريخ وثقافة)</h2>
+      <p class="muted">${civAvg === null ? 'ما جرّبت بعد.' : `معدّل آخر ${civ.length} محاولات: ${civAvg}%`}</p>
+      <a class="btn" href="#/civics">تدرّب على الأسئلة</a>
+    </div>`);
+}
+
+async function placement(lang, live) {
+  const total = 10, steps = [], asked = [];
+  let stepIdx = LANGS[lang].start;
+  for (let n = 0; n < total; n++) {
+    let q;
+    for (;;) {
+      view(spinner('جاري تجهيز السؤال...'));
+      try { q = await api('placement', { lang, level: LEVELS[stepIdx], asked }); break; }
+      catch (e) { await step(r => failScreen(e, r)); }
+    }
+    if (!live()) return;
+    asked.push(q.question); steps.push(stepIdx);
+    const ok = await quizCard({ q, idx: n, total, label: 'سؤال' });
+    if (!live()) return;
+    stepIdx = Math.max(0, Math.min(LEVELS.length - 1, stepIdx + (ok ? 1 : -1)));
+  }
+  const tail = [...steps.slice(3), stepIdx];
+  S.level[lang] = Math.round(tail.reduce((a, b) => a + b, 0) / tail.length);
+  S.placed[lang] = true; S.recent[lang] = [];
+  save();
+  view(`
+    <div class="card" style="text-align:center">
+      <h1>${LANGS[lang].flag} مستواك التقريبي: ${lvlHtml(levelName(lang))}</h1>
+      <p class="muted">هذا تقدير بسيط، والتطبيق بيعدّل الصعوبة تلقائيًا مع تقدّمك.</p>
+      <a class="btn primary" href="#/session/${lang}">ابدأ أول جلسة</a>
+    </div>`);
+}
+
+function adapt(lang, pct) {
+  const r = S.recent[lang];
+  r.push(pct); if (r.length > 3) r.shift();
+  const avg = r.reduce((a, b) => a + b, 0) / r.length;
+  if (r.length >= 2 && avg >= 85 && S.level[lang] < LEVELS.length - 1) { S.level[lang]++; r.length = 0; return 'up'; }
+  if (r.length >= 2 && avg < 55 && S.level[lang] > 0) { S.level[lang]--; r.length = 0; return 'down'; }
+  return '';
+}
+
+const wordRx = /[\p{L}\p{M}]+(?:['’][\p{L}\p{M}]+)*/gu;
+function clickableText(text) {
+  let out = '', last = 0;
+  for (const m of text.matchAll(wordRx)) {
+    out += esc(text.slice(last, m.index)) + `<span class="w" data-act="word" data-w="${esc(m[0])}">${esc(m[0])}</span>`;
+    last = m.index + m[0].length;
+  }
+  return out + esc(text.slice(last));
+}
+
+function storyScreen(lang, story) {
+  let added = 0, popToken = 0, translation = false;
+  const vocabHtml = story.vocab.map((v, i) => `
+    <div><span class="ltr"><b>${esc(v.word)}</b> — ${esc(v.meaning_ar)}</span>
+    <button data-act="addv" data-i="${i}">＋ مراجعة</button></div>`).join('');
+  return step(done => view(`
+    <div class="card">
+      <div class="row between"><h2 class="ltr">${esc(story.title)}</h2><span class="pill">${lvlHtml(levelName(lang))}</span></div>
+      <div class="row"><button data-act="say">🔊 استمع</button><button data-act="tr">ترجمة</button></div>
+      <p class="story ltr">${clickableText(story.text)}</p>
+      <p class="muted">💡 اضغط على أي كلمة لشرحها.</p>
+      <div id="tr" class="feedback" hidden>${esc(story.translation_ar || '')}</div>
+    </div>
+    <div class="card"><h2>كلمات القصة</h2><div class="vocab">${vocabHtml}</div></div>
+    <div id="pop"></div>
+    <button class="primary big" data-act="go">ابدأ الأسئلة ←</button>`, {
+    say: () => speak(story.text, lang),
+    tr() { translation = !translation; document.getElementById('tr').hidden = !translation; },
+    addv(btn) {
+      const v = story.vocab[+btn.dataset.i];
+      if (addCard(lang, v.word, v.meaning_ar)) added++;
+      btn.textContent = '✓'; btn.disabled = true;
+    },
+    async word(el) {
+      const word = el.dataset.w, token = ++popToken, pop = document.getElementById('pop');
+      pop.innerHTML = `<div class="card pop">${spinner('...')}</div>`;
+      const context = story.text.split(/(?<=[.!?;])\s+/).find(s => s.includes(word)) || '';
+      try {
+        const r = await api('explain', { lang, word, context });
+        if (token !== popToken) return;
+        pop.innerHTML = `<div class="card pop">
+          <div class="row between"><b class="ltr">${esc(r.lemma || word)}</b><span class="muted">${esc(r.pos || '')}</span></div>
+          <p>${esc(r.meaning_ar)}</p>
+          ${r.note_ar ? `<p class="muted">${esc(r.note_ar)}</p>` : ''}
+          ${r.example ? `<p class="ltr">${esc(r.example)}<br><span class="muted">${esc(r.example_ar || '')}</span></p>` : ''}
+          <div class="row"><button data-act="padd">＋ أضف للمراجعة</button><button data-act="psay">🔊</button><button data-act="pclose">إغلاق</button></div></div>`;
+        popData = { lemma: r.lemma || word, meaning: r.meaning_ar };
+      } catch (e) { if (token === popToken) pop.innerHTML = `<div class="card pop">${esc(e.message)}</div>`; }
+    },
+    padd() { if (addCard(lang, popData.lemma, popData.meaning)) { added++; toast('انضافت للمراجعة'); } else toast('موجودة من قبل'); },
+    psay: () => speak(popData.lemma, lang),
+    pclose() { popToken++; document.getElementById('pop').innerHTML = ''; },
+    go: () => done(added),
+  }));
+}
+let popData = { lemma: '', meaning: '' };
+
+async function writingStep(lang, story) {
+  const prompt = `اكتب 2-3 جمل عن القصة أو عن يومك (بال${LANGS[lang].name})`;
+  const result = await step(done => { let last = null; view(`
+    <div class="card">
+      <h2>✍️ تمرين كتابة</h2>
+      <p class="muted">${esc(prompt)}</p>
+      <textarea class="ltr" id="txt" maxlength="1000" lang="${lang}"></textarea>
+      <div class="row" style="margin-top:10px"><button class="primary" data-act="chk">صحّح لي</button><button data-act="skip">تخطّي</button></div>
+      <div id="out"></div>
+    </div>`, {
+    skip: () => done(null),
+    fin: () => done(last),
+    async chk(btn) {
+      const text = document.getElementById('txt').value.trim();
+      if (!text) return toast('اكتب شيئًا أولًا');
+      btn.disabled = true;
+      const out = document.getElementById('out');
+      out.innerHTML = spinner('جاري التصحيح...');
+      try {
+        const r = await api('check', { lang, level: levelName(lang), text, prompt });
+        out.innerHTML = `
+          <div class="feedback ok ltr"><b>${esc(r.corrected)}</b></div>
+          ${(r.mistakes || []).map(m => `<div class="feedback bad"><span class="ltr">${esc(m.wrong)} → <b>${esc(m.right)}</b></span><br>${esc(m.explanation_ar)}</div>`).join('')}
+          ${r.tip_ar ? `<p class="muted">💡 ${esc(r.tip_ar)}</p>` : ''}
+          <button class="primary" data-act="fin">متابعة ←</button>`;
+        last = r;
+      } catch (e) { out.innerHTML = `<p>${esc(e.message)}</p>`; btn.disabled = false; }
+    },
+  }); });
+  return result;
+}
+
+async function session(lang, live) {
+  if (!S.placed[lang] && !confirm('ما حدّدت مستواك بعد. تبي تبدأ من المستوى الافتراضي؟')) { location.hash = `#/placement/${lang}`; return; }
+
+  const due = dueCards(lang).slice(0, 8);
+  if (due.length) {
+    const known = await reviewCards(due, 'مراجعة كلمات');
+    if (!live()) return;
+    toast(`راجعت ${due.length} كلمات، عرفت ${known}`);
+  }
+
+  const weak = S.cards.filter(c => c.lang === lang && c.box <= 2).slice(0, 6).map(c => c.word);
+  let story;
+  for (;;) {
+    view(spinner('جاري كتابة قصة بمستواك...'));
+    try { story = await api('story', { lang, level: levelName(lang), topic: pick(TOPICS), words: weak }); break; }
+    catch (e) { await step(r => failScreen(e, r)); }
+    if (!live()) return;
+  }
+  if (!live()) return;
+
+  const added = await storyScreen(lang, story);
+  if (!live()) return;
+
+  let correct = 0;
+  for (const [i, q] of story.questions.entries()) {
+    if (await quizCard({ q, idx: i, total: story.questions.length, label: 'سؤال' })) correct++;
+    if (!live()) return;
+  }
+
+  await writingStep(lang, story);
+  if (!live()) return;
+
+  const pct = Math.round((correct / story.questions.length) * 100);
+  const before = levelName(lang);
+  const change = adapt(lang, pct);
+  S.sessions++; touchStreak(); save();
+  const note = change === 'up' ? `🚀 ارتفع مستواك من ${lvlHtml(before)} إلى ${lvlHtml(levelName(lang))}!`
+    : change === 'down' ? `🌱 خفّفنا الصعوبة لـ ${lvlHtml(levelName(lang))} عشان تثبّت الأساس، وبترجع تطلع.`
+    : `المستوى الحالي: ${lvlHtml(levelName(lang))}`;
+  view(`
+    <div class="card" style="text-align:center">
+      <h1>🎉 خلصت جلسة اليوم</h1>
+      <p style="font-size:28px;margin:4px 0">${correct}/${story.questions.length} (${pct}%)</p>
+      <p>${note}</p>
+      <p class="muted">🔥 ${streakNow()} أيام متواصلة${added ? ` · أضفت ${added} كلمات للمراجعة` : ''}</p>
+      <div class="row" style="justify-content:center"><a class="btn primary" href="#/">الرئيسية</a><a class="btn" href="#/session/${lang}" onclick="setTimeout(route,0)">جلسة أخرى</a></div>
+    </div>`);
+}
+
+async function civics(live) {
+  const params = await step(done => view(`
+    <h1>🏛️ تدرّب على اختبار الجنسية</h1>
+    <div class="card">
+      <div class="warn">الأسئلة مولّدة بالذكاء الاصطناعي لتتعوّد على الأسلوب. اعتمد دائمًا على مادة الدراسة الرسمية، وتأكد من أي معلومة بتشك فيها.</div>
+      <label for="topic">الموضوع</label>
+      <select id="topic">
+        <option value="mixed">منوّع</option><option value="history">التاريخ</option><option value="geography">الجغرافيا</option>
+        <option value="government">الدولة والمؤسسات</option><option value="culture">الثقافة</option><option value="traditions">الأعياد والتقاليد</option>
+      </select>
+      <label for="count">عدد الأسئلة</label>
+      <select id="count"><option>5</option><option>8</option><option>3</option></select>
+      <p><button class="primary" data-act="start">ابدأ</button></p>
+    </div>`, {
+    start: () => done({ topic: document.getElementById('topic').value, count: +document.getElementById('count').value }),
+  }));
+  let data;
+  for (;;) {
+    view(spinner('جاري تجهيز الأسئلة...'));
+    try { data = await api('civics', params); break; }
+    catch (e) { await step(r => failScreen(e, r)); }
+    if (!live()) return;
+  }
+  if (!live()) return;
+  let correct = 0;
+  for (const [i, q] of data.questions.entries()) {
+    if (await quizCard({ q, idx: i, total: data.questions.length, label: q.topic || 'سؤال' })) correct++;
+    if (!live()) return;
+  }
+  const pct = Math.round((correct / data.questions.length) * 100);
+  S.civics.push({ date: today(), pct }); S.civics = S.civics.slice(-30);
+  touchStreak(); save();
+  view(`<div class="card" style="text-align:center"><h1>النتيجة: ${correct}/${data.questions.length} (${pct}%)</h1>
+    <div class="row" style="justify-content:center"><a class="btn primary" href="#/">الرئيسية</a><a class="btn" href="#/civics" onclick="setTimeout(route,0)">محاولة أخرى</a></div></div>`);
+}
+
+async function words(live) {
+  const draw = () => {
+    const due = dueCards();
+    view(`
+      <h1>📝 الكلمات</h1>
+      <div class="card">
+        <p>${S.cards.length} كلمة محفوظة · <b>${due.length}</b> جاهزة للمراجعة الآن</p>
+        <button class="primary" data-act="rev" ${due.length ? '' : 'disabled'}>ابدأ المراجعة</button>
+        <p class="muted">أضف كلمات من القصص بالضغط عليها. كل ما عرفتها صح، بتظهر لك بعد فترة أطول.</p>
+      </div>
+      ${S.cards.length ? `<div class="card vocab">${S.cards.map(c => `
+        <div><span class="ltr">${LANGS[c.lang].flag} <b>${esc(c.word)}</b> — ${esc(c.meaning)}</span>
+        <button data-act="del" data-id="${c.id}" aria-label="حذف">🗑️</button></div>`).join('')}</div>` : ''}`, {
+      async rev() {
+        const known = await reviewCards(due.slice(0, 15), 'مراجعة');
+        if (!live()) return;
+        touchStreak(); save();
+        toast(`عرفت ${known} كلمات`); draw();
+      },
+      del(b) { S.cards = S.cards.filter(c => String(c.id) !== b.dataset.id); save(); draw(); },
+    });
+  };
+  draw();
+}
+
+function settings() {
+  view(`
+    <h1>⚙️ الإعدادات</h1>
+    <div class="card">
+      <label for="exam">موعد اختبار الجنسية</label>
+      <input type="date" id="exam" value="${esc(S.examDate)}">
+      <label for="pass">رمز الدخول (إذا السيرفر محمي)</label>
+      <input type="password" id="pass" value="${esc(S.passcode)}" autocomplete="off">
+      <p><button class="primary" data-act="save">حفظ</button></p>
+    </div>
+    <div class="card">
+      <h2>نسخة احتياطية</h2>
+      <p class="muted">بياناتك محفوظة في هذا المتصفح فقط. خذ نسخة قبل ما تغيّر جهازك أو تمسح بيانات المتصفح.</p>
+      <div class="row"><button data-act="exp">تنزيل نسخة</button><button data-act="imp">استيراد نسخة</button>
+      <input type="file" id="file" accept="application/json" hidden></div>
+    </div>
+    <div class="card"><button data-act="reset">🗑️ مسح كل البيانات</button></div>`, {
+    save() {
+      S.examDate = document.getElementById('exam').value;
+      S.passcode = document.getElementById('pass').value;
+      save(); toast('انحفظت الإعدادات');
+    },
+    exp() {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([JSON.stringify(S)], { type: 'application/json' }));
+      a.download = `lang-backup-${today()}.json`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    },
+    imp() {
+      const f = document.getElementById('file');
+      f.onchange = async () => {
+        try {
+          const d = JSON.parse(await f.files[0].text());
+          if (!d || typeof d !== 'object' || !d.level || !Array.isArray(d.cards)) throw 0;
+          S = { ...defaults(), ...d }; save(); toast('تم الاستيراد'); settings();
+        } catch { toast('الملف غير صالح'); }
+      };
+      f.click();
+    },
+    reset() { if (confirm('متأكد؟ رح تنمسح كل التقدّمات.')) { S = defaults(); save(); location.hash = '#/'; route(); } },
+  });
+}
+
+// ---------- router ----------
+let viewId = 0;
+function route() {
+  const id = ++viewId, live = () => id === viewId;
+  const [, name = '', arg = ''] = (location.hash || '#/').slice(1).split('/');
+  const lang = LANGS[arg] ? arg : 'el';
+  const run = p => p.catch(e => { if (live()) failScreen(e, route); });
+  switch (name) {
+    case 'placement': return run(placement(lang, live));
+    case 'session': return run(session(lang, live));
+    case 'civics': return run(civics(live));
+    case 'words': return run(words(live));
+    case 'settings': return settings();
+    default: return home();
+  }
+}
+window.addEventListener('hashchange', route);
+
+async function boot() {
+  try {
+    const st = await (await fetch('/api/status')).json();
+    if (st.demo) document.getElementById('banner').innerHTML =
+      '<div class="warn">وضع تجريبي: المحتوى جاهز مسبقًا. أضف مفتاح Claude API على السيرفر ليشتغل الذكاء الاصطناعي فعليًا.</div>';
+  } catch { /* offline: ignore */ }
+  route();
+}
+boot();
